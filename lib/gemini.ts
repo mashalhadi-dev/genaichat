@@ -37,6 +37,7 @@ export type GeminiStreamEvent =
 export interface GeminiStreamOptions {
   onRetry?: (event: GeminiRetryEvent) => void;
   maxAttempts?: number;
+  signal?: AbortSignal;
 }
 
 interface ErrorDetails {
@@ -148,6 +149,7 @@ export async function* streamGeminiWithRetry(
       const response = await getClient().models.generateContentStream({
         model: modelName,
         contents,
+        ...(options.signal ? { config: { abortSignal: options.signal } } : {}),
       });
 
       for await (const chunk of response) {
@@ -169,6 +171,7 @@ export async function* streamGeminiWithRetry(
       yield { type: 'done', usage };
       return;
     } catch (error: unknown) {
+      if (options.signal?.aborted) throw error;
       const details = logGeminiError(error, modelName, attempt);
       if (attempt === maxAttempts || emittedText || !isRetryable(details)) {
         throw error;
@@ -210,6 +213,7 @@ export async function* streamGeminiWithFallback(
       }
       return;
     } catch (error: unknown) {
+      if (options.signal?.aborted) throw error;
       const details = getErrorDetails(error);
       const hasFallback = index < models.length - 1;
       const canFallback =

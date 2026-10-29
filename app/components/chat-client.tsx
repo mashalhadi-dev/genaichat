@@ -143,7 +143,13 @@ async function consumeNdjsonStream(
     buffer += decoder.decode();
     parseLine(buffer);
   } catch (error: unknown) {
-    await reader.cancel(error);
+    try {
+      await reader.cancel(error);
+    } catch (cancelError: unknown) {
+      if (cancelError !== error) {
+        console.warn('Could not cancel the failed Gemini response stream.', cancelError);
+      }
+    }
     throw error;
   }
 }
@@ -394,9 +400,7 @@ export default function ChatClient() {
             : event.timedOut
               ? 'Gemini is taking too long'
               : 'Gemini is under heavy load';
-          setGenerationStatus(
-            `${reason}. Retrying in ${delaySeconds}s (${event.attempt}/3)…`,
-          );
+          setGenerationStatus(`${reason}. Retrying in ${delaySeconds}s (retry ${event.attempt})…`);
         } else if (event.type === 'fallback') {
           responseState = { ...responseState, model: event.fallbackModel };
           const reason =
@@ -436,7 +440,14 @@ export default function ChatClient() {
         throw new Error('Gemini closed the stream before completing the response.');
       }
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : 'The Gemini request failed.';
+      const message =
+        error instanceof ChatStreamError
+          ? error.message
+          : error instanceof TypeError
+            ? 'Connection to Gemini was interrupted. Check your connection and try again.'
+            : error instanceof Error
+              ? error.message
+              : 'The Gemini request failed.';
       setRequestError(
         error instanceof ChatStreamError && error.status === 429
           ? `${message} The request limit is shown above.`

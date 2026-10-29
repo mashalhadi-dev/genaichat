@@ -6,6 +6,7 @@ import {
   isGeminiTimeout,
   streamGeminiWithFallback,
 } from '@/lib/gemini';
+import type { GeminiStreamEvent } from '@/lib/gemini';
 import {
   consumeRequest,
   recordFailure,
@@ -161,33 +162,39 @@ export async function POST(request: Request): Promise<Response> {
   contents.push({ role: 'user', parts });
 
   const encoder = new TextEncoder();
+  const abortController = new AbortController();
+  let iterator: AsyncGenerator<GeminiStreamEvent> | undefined;
+  let effectiveModel = model;
   const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      let effectiveModel = model;
-
-      function send(event: Record<string, unknown>): void {
+    async pull(controller) {
+      function send(event: GeminiStreamEvent | { type: 'error'; error: string; status: number }): void {
         controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
       }
 
       try {
-        for await (const event of streamGeminiWithFallback(contents, model, {
+        iterator ??= streamGeminiWithFallback(contents, model, {
           onRetry: (retryEvent) => recordRetry(retryEvent.status, retryEvent.timedOut),
-        })) {
-          if (event.type === 'retry') {
-            if (event.status === 429) recordRateLimitWarning();
-            send(event);
-          } else if (event.type === 'fallback') {
-            effectiveModel = event.fallbackModel;
-            recordModelFallback(effectiveModel, event.status, event.timedOut);
-            send(event);
-          } else if (event.type === 'chunk') {
-            send(event);
-          } else {
-            recordSuccess(effectiveModel, event.usage);
-            send(event);
-          }
+          signal: abortController.signal,
+        });
+        const result = await iterator.next();
+        if (result.done) {
+          controller.close();
+          return;
         }
+
+        const event = result.value;
+        if (event.type === 'retry') {
+          if (event.status === 429) recordRateLimitWarning();
+        } else if (event.type === 'fallback') {
+          effectiveModel = event.fallbackModel;
+          recordModelFallback(effectiveModel, event.status, event.timedOut);
+        } else if (event.type === 'done') {
+          recordSuccess(effectiveModel, event.usage);
+        }
+        send(event);
       } catch (error: unknown) {
+        if (controller.desiredSize === null) return;
+
         const status = getGeminiErrorStatus(error);
         const timedOut = isGeminiTimeout(error);
         const errorMessage =
@@ -219,9 +226,11 @@ export async function POST(request: Request): Promise<Response> {
           error: publicMessage,
           status: isConfigurationError ? 503 : timedOut ? 504 : (status ?? 502),
         });
-      } finally {
         controller.close();
       }
+    },
+    cancel(reason) {
+      abortController.abort(reason);
     },
   });
 
