@@ -4,11 +4,12 @@ import {
   DEFAULT_GEMINI_MODEL,
   getGeminiErrorStatus,
   isGeminiTimeout,
-  streamGeminiWithRetry,
+  streamGeminiWithFallback,
 } from '@/lib/gemini';
 import {
   consumeRequest,
   recordFailure,
+  recordModelFallback,
   recordRateLimitWarning,
   recordRetry,
   recordSuccess,
@@ -162,27 +163,41 @@ export async function POST(request: Request): Promise<Response> {
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
+      let effectiveModel = model;
+
       function send(event: Record<string, unknown>): void {
         controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
       }
 
       try {
-        for await (const event of streamGeminiWithRetry(contents, model, {
+        for await (const event of streamGeminiWithFallback(contents, model, {
           onRetry: (retryEvent) => recordRetry(retryEvent.status, retryEvent.timedOut),
         })) {
           if (event.type === 'retry') {
             if (event.status === 429) recordRateLimitWarning();
             send(event);
+          } else if (event.type === 'fallback') {
+            effectiveModel = event.fallbackModel;
+            recordModelFallback(effectiveModel, event.status, event.timedOut);
+            send(event);
           } else if (event.type === 'chunk') {
             send(event);
           } else {
-            recordSuccess(model, event.usage);
+            recordSuccess(effectiveModel, event.usage);
             send(event);
           }
         }
       } catch (error: unknown) {
         const status = getGeminiErrorStatus(error);
         const timedOut = isGeminiTimeout(error);
+        const errorMessage =
+          error instanceof Error ? error.message : 'Gemini threw a non-Error value.';
+        console.error('[Chat API] Gemini request failed', {
+          model: effectiveModel,
+          status,
+          message: errorMessage,
+          error,
+        });
         const isConfigurationError =
           error instanceof Error && error.message.startsWith('Set GOOGLE_GENAI_API_KEY');
         const publicMessage = isConfigurationError
@@ -191,6 +206,10 @@ export async function POST(request: Request): Promise<Response> {
             ? 'The Gemini request timed out. Please try again.'
             : status === 429
               ? 'Gemini is rate limiting requests. Please try again shortly.'
+              : status === 404
+                ? `Gemini model "${effectiveModel}" is unavailable. Check the model ID and API access.`
+                : status === 403
+                  ? 'The Gemini API key does not have permission to use this model.'
               : status !== undefined && status >= 500
                 ? 'The Gemini service is temporarily unavailable.'
                 : 'Gemini could not complete this request.';
@@ -198,7 +217,7 @@ export async function POST(request: Request): Promise<Response> {
         send({
           type: 'error',
           error: publicMessage,
-          status: isConfigurationError ? 503 : (status ?? 502),
+          status: isConfigurationError ? 503 : timedOut ? 504 : (status ?? 502),
         });
       } finally {
         controller.close();

@@ -27,6 +27,13 @@ type ChatStreamEvent =
       timedOut: boolean;
       delayMs: number;
     }
+  | {
+      type: 'fallback';
+      requestedModel: string;
+      fallbackModel: string;
+      status?: number;
+      timedOut: boolean;
+    }
   | { type: 'done'; usage: { promptTokens: number; candidateTokens: number } }
   | { type: 'error'; error: string; status: number };
 
@@ -54,6 +61,21 @@ function parseStreamEvent(value: unknown): ChatStreamEvent {
       attempt: value.attempt,
       timedOut: value.timedOut,
       delayMs: value.delayMs,
+      ...(typeof value.status === 'number' ? { status: value.status } : {}),
+    };
+  }
+  if (
+    value.type === 'fallback' &&
+    typeof value.requestedModel === 'string' &&
+    typeof value.fallbackModel === 'string' &&
+    typeof value.timedOut === 'boolean' &&
+    (value.status === undefined || typeof value.status === 'number')
+  ) {
+    return {
+      type: 'fallback',
+      requestedModel: value.requestedModel,
+      fallbackModel: value.fallbackModel,
+      timedOut: value.timedOut,
       ...(typeof value.status === 'number' ? { status: value.status } : {}),
     };
   }
@@ -331,6 +353,7 @@ export default function ChatClient() {
     for (const file of files) formData.append('files', file);
 
     let streamedText = '';
+    let responseState = nextState;
     try {
       const response = await fetch('/api/chat', { method: 'POST', body: formData });
       if (!response.ok) {
@@ -350,7 +373,7 @@ export default function ChatClient() {
           streamedText += event.text;
           setGenerationStatus('Streaming response…');
           updateState({
-            ...nextState,
+            ...responseState,
             sessions: [
               {
                 ...streamingSession,
@@ -361,7 +384,7 @@ export default function ChatClient() {
                     : message,
                 ),
               },
-              ...nextState.sessions.filter((session) => session.id !== sessionId),
+              ...responseState.sessions.filter((session) => session.id !== sessionId),
             ],
           });
         } else if (event.type === 'retry') {
@@ -374,12 +397,22 @@ export default function ChatClient() {
           setGenerationStatus(
             `${reason}. Retrying in ${delaySeconds}s (${event.attempt}/3)…`,
           );
+        } else if (event.type === 'fallback') {
+          responseState = { ...responseState, model: event.fallbackModel };
+          const reason =
+            event.status === 404
+              ? 'is unavailable'
+              : event.timedOut
+                ? 'timed out'
+                : 'is under heavy load';
+          setGenerationStatus(`${event.requestedModel} ${reason}. Trying ${event.fallbackModel}…`);
+          updateState(responseState);
         } else if (event.type === 'done') {
           receivedDoneEvent = true;
           if (!streamedText) {
             streamedText = 'The model returned an empty response.';
             updateState({
-              ...nextState,
+              ...responseState,
               sessions: [
                 {
                   ...streamingSession,
@@ -389,7 +422,7 @@ export default function ChatClient() {
                       : message,
                   ),
                 },
-                ...nextState.sessions.filter((session) => session.id !== sessionId),
+                ...responseState.sessions.filter((session) => session.id !== sessionId),
               ],
             });
           }
@@ -414,7 +447,7 @@ export default function ChatClient() {
       setGenerationStatus('');
       if (!streamedText) {
         updateState({
-          ...nextState,
+          ...responseState,
           sessions: [
             {
               ...nextSession,
@@ -422,7 +455,7 @@ export default function ChatClient() {
                 (message) => message.id !== assistantMessage.id,
               ),
             },
-            ...nextState.sessions.filter((session) => session.id !== sessionId),
+            ...responseState.sessions.filter((session) => session.id !== sessionId),
           ],
         });
       }
@@ -488,9 +521,9 @@ export default function ChatClient() {
             onChange={(event) => setModel(event.target.value)}
             value={state.model}
           >
-            <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-            <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
-            <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+            <option value="gemini-3.8-flash">Gemini 3.8 Flash</option>
+            <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
+            <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash-Lite</option>
           </select>
           <Link className="admin-link" href="/app/admin">
             <span aria-hidden="true">◷</span> System monitoring
@@ -531,9 +564,9 @@ export default function ChatClient() {
               onChange={(event) => setModel(event.target.value)}
               value={state.model}
             >
-              <option value="gemini-2.5-flash">2.5 Flash</option>
-              <option value="gemini-2.5-pro">2.5 Pro</option>
-              <option value="gemini-2.0-flash">2.0 Flash</option>
+              <option value="gemini-3.8-flash">3.8 Flash</option>
+              <option value="gemini-3.6-flash">3.6 Flash</option>
+              <option value="gemini-3.5-flash-lite">3.5 Flash-Lite</option>
             </select>
             <Link className="mobile-admin-link" href="/app/admin">
               Monitor

@@ -1,7 +1,8 @@
 import { GoogleGenAI } from '@google/genai';
 import type { Content } from '@google/genai';
 
-export const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
+export const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
+export const FALLBACK_GEMINI_MODELS = ['gemini-3.6-flash', 'gemini-3.5-flash-lite'] as const;
 export const GEMINI_TIMEOUT_MS = 30_000;
 
 export interface GeminiUsage {
@@ -24,10 +25,18 @@ export interface GeminiRetryEvent {
 export type GeminiStreamEvent =
   | { type: 'chunk'; text: string }
   | { type: 'retry'; attempt: number; status?: number; timedOut: boolean; delayMs: number }
+  | {
+      type: 'fallback';
+      requestedModel: string;
+      fallbackModel: string;
+      status?: number;
+      timedOut: boolean;
+    }
   | { type: 'done'; usage: GeminiUsage };
 
 export interface GeminiStreamOptions {
   onRetry?: (event: GeminiRetryEvent) => void;
+  maxAttempts?: number;
 }
 
 interface ErrorDetails {
@@ -109,6 +118,18 @@ function isRetryable(error: ErrorDetails): boolean {
   );
 }
 
+function logGeminiError(error: unknown, model: string, attempt: number): ErrorDetails {
+  const details = getErrorDetails(error);
+  console.error('[Gemini] Model request failed', {
+    model,
+    attempt,
+    status: details.status,
+    message: details.message,
+    error,
+  });
+  return details;
+}
+
 function wait(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -118,7 +139,7 @@ export async function* streamGeminiWithRetry(
   modelName = DEFAULT_GEMINI_MODEL,
   options: GeminiStreamOptions = {},
 ): AsyncGenerator<GeminiStreamEvent> {
-  const maxAttempts = 4;
+  const maxAttempts = options.maxAttempts ?? 2;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     let emittedText = false;
@@ -148,7 +169,7 @@ export async function* streamGeminiWithRetry(
       yield { type: 'done', usage };
       return;
     } catch (error: unknown) {
-      const details = getErrorDetails(error);
+      const details = logGeminiError(error, modelName, attempt);
       if (attempt === maxAttempts || emittedText || !isRetryable(details)) {
         throw error;
       }
@@ -167,6 +188,49 @@ export async function* streamGeminiWithRetry(
   }
 
   throw new Error('Gemini retry loop ended unexpectedly.');
+}
+
+export async function* streamGeminiWithFallback(
+  contents: Content[],
+  modelName = DEFAULT_GEMINI_MODEL,
+  options: GeminiStreamOptions = {},
+): AsyncGenerator<GeminiStreamEvent> {
+  const requestedModel = modelName.trim() || DEFAULT_GEMINI_MODEL;
+  const models = [...new Set([requestedModel, DEFAULT_GEMINI_MODEL, ...FALLBACK_GEMINI_MODELS])];
+
+  for (const [index, model] of models.entries()) {
+    let emittedText = false;
+    try {
+      for await (const event of streamGeminiWithRetry(contents, model, {
+        ...options,
+        maxAttempts: index === 0 ? options.maxAttempts : 1,
+      })) {
+        if (event.type === 'chunk') emittedText = true;
+        yield event;
+      }
+      return;
+    } catch (error: unknown) {
+      const details = getErrorDetails(error);
+      const hasFallback = index < models.length - 1;
+      const canFallback =
+        details.status === 404 ||
+        details.status === 503 ||
+        details.timedOut;
+      if (!hasFallback || emittedText || !canFallback) throw error;
+
+      const fallbackModel = models[index + 1];
+      console.warn(
+        `[Gemini] Model "${model}" failed (HTTP ${details.status ?? 'timeout'}); falling back to "${fallbackModel}".`,
+      );
+      yield {
+        type: 'fallback',
+        requestedModel: model,
+        fallbackModel,
+        status: details.status,
+        timedOut: details.timedOut,
+      };
+    }
+  }
 }
 
 export function getGeminiErrorStatus(error: unknown): number | undefined {

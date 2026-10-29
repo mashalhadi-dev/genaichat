@@ -16,6 +16,11 @@ exponential backoff retries and live application request-capacity feedback.
 The chat accepts PNG, JPEG, PDF, TXT, Markdown, CSV, and JSON files (up to 8 MB
 each, five files per request). Chat sessions and model selection are local to
 the current browser and are not shared across browsers or devices.
+The default model is `gemini-3.8-flash`. If a selected model is unavailable
+(HTTP 404), or the provider reports sustained high demand/timeouts, the request
+falls back through `gemini-3.8-flash`, `gemini-3.6-flash`, and
+`gemini-3.5-flash-lite`; a successful fallback is saved as the browser's new
+model preference.
 
 ## Monitoring
 

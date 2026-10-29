@@ -61,7 +61,7 @@ function getState(): MonitoringState {
       failedRequests: 0,
       promptTokens: 0,
       candidateTokens: 0,
-      activeModel: 'gemini-2.5-flash',
+      activeModel: 'gemini-3.8-flash',
       logs: [],
     };
   }
@@ -129,8 +129,14 @@ export function recordRateLimitWarning(): void {
   addLog('warning', 'Gemini returned HTTP 429; retrying with exponential backoff.');
 }
 
+export function recordModelFallback(model: string, status?: number, timedOut = false): void {
+  getState().activeModel = model;
+  const reason = timedOut ? 'after a timeout' : `after HTTP ${status ?? 'error'}`;
+  addLog('warning', `Falling back to ${model} ${reason}.`);
+}
+
 function getContextWindow(model: string): number | null {
-  if (/^gemini-(?:2\.5|2\.0|1\.5)/i.test(model)) return 1_048_576;
+  if (/^gemini-(?:3\.[568]|2\.5)/i.test(model)) return 1_048_576;
   return null;
 }
 
